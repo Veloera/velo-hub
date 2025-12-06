@@ -1,0 +1,197 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  prepare-release:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    outputs:
+      has_changesets: ${{ steps.changesets.outputs.has_changesets }}
+      version: ${{ steps.version.outputs.version }}
+      notes: ${{ steps.notes.outputs.notes }}
+      release_id: ${{ steps.create_release.outputs.id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect pending changesets
+        id: changesets
+        run: |
+          count=$(find .changeset -maxdepth 1 -type f -name "*.md" ! -name "README.md" | wc -l | tr -d ' ')
+          if [ "$count" != "0" ]; then
+            echo "has_changesets=true" >> "$GITHUB_OUTPUT"
+            echo "Found $count changeset(s)."
+          else
+            echo "has_changesets=false" >> "$GITHUB_OUTPUT"
+            echo "No pending changesets, skipping."
+          fi
+
+      - name: Stop when no release is needed
+        if: steps.changesets.outputs.has_changesets == 'false'
+        run: echo "Release not required."
+
+      - name: Setup Bun
+        if: steps.changesets.outputs.has_changesets == 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.3
+
+      - name: Install dependencies
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: bun install --frozen-lockfile
+
+      - name: Lint
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: bun run lint
+
+      - name: Build frontend bundle
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: bun run build
+
+      - name: Configure git user
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Version packages with Changesets
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: bunx changeset version
+
+      - name: Capture release version
+        if: steps.changesets.outputs.has_changesets == 'true'
+        id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create release tags
+        if: steps.changesets.outputs.has_changesets == 'true'
+        run: bunx changeset tag
+
+      - name: Create v* tag
+        if: steps.changesets.outputs.has_changesets == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if git rev-parse "v${VERSION}" >/dev/null 2>&1; then
+            echo "Tag v${VERSION} already exists. Skipping."
+          else
+            git tag "v${VERSION}"
+          fi
+
+      - name: Push release commit and tags
+        if: steps.changesets.outputs.has_changesets == 'true'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git push origin HEAD:main --follow-tags
+
+      - name: Extract release notes
+        if: steps.changesets.outputs.has_changesets == 'true'
+        id: notes
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          node <<'EOF'
+          const fs = require('fs');
+          const version = process.env.VERSION;
+          const changelogPath = 'CHANGELOG.md';
+          const outputPath = process.env.GITHUB_OUTPUT;
+          let notes = '';
+          if (fs.existsSync(changelogPath)) {
+            const lines = fs.readFileSync(changelogPath, 'utf8').split(/\r?\n/);
+            let capture = false;
+            for (const line of lines) {
+              if (line.startsWith('## ')) {
+                if (capture) break;
+                if (line.trim() === `## ${version}`) {
+                  capture = true;
+                }
+              }
+              if (capture) {
+                notes += line + '\n';
+              }
+            }
+          }
+          const fallback = `## ${version}\n\nChanges generated automatically by Changesets.`;
+          const finalNotes = notes.trim().length ? notes.trim() : fallback;
+          fs.appendFileSync(outputPath, `notes<<EOF\n${finalNotes}\nEOF\n`);
+          EOF
+
+      - name: Create GitHub release
+        if: steps.changesets.outputs.has_changesets == 'true'
+        id: create_release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          release_name: v${{ steps.version.outputs.version }}
+          body: ${{ steps.notes.outputs.notes }}
+          draft: false
+          prerelease: false
+
+  build-tauri:
+    needs: prepare-release
+    if: ${{ needs.prepare-release.outputs.has_changesets == 'true' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - macos-latest
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.3
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux dependencies
+        if: matrix.platform == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev \
+            libsoup-3.0-dev \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Build and upload Tauri bundle
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          releaseId: ${{ needs.prepare-release.outputs.release_id }}
