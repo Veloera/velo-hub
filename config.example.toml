@@ -1,0 +1,47 @@
+# Velo Hub Configuration Example
+# Copy this file to ~/.velo-hub/config.toml and customize as needed
+
+[server]
+# Host address to bind the HTTP server
+host = "127.0.0.1"
+
+# Port number for the HTTP server
+port = 8080
+
+# Enable TLS/HTTPS (requires certificate configuration)
+enable_tls = false
+
+[database]
+# Path to SQLite database file
+# Supports tilde (~) expansion for home directory
+path = "~/.velo-hub/data.db"
+
+[circuit_breaker]
+# Failure rate threshold (0.0 to 1.0) to trigger circuit breaker
+# 0.5 means 50% error rate will open the circuit
+failure_threshold = 0.5
+
+# Time window in seconds for calculating error rate
+window_duration_secs = 60
+
+# Cooldown period in seconds before attempting to close the circuit
+cooldown_duration_secs = 30
+
+# Maximum number of test requests in half-open state
+half_open_max_requests = 3
+
+[session]
+# Session time-to-live in minutes
+# Sessions expire after this period of inactivity
+ttl_minutes = 5
+
+# Interval in seconds for cleaning up expired sessions
+cleanup_interval_secs = 60
+
+[logging]
+# Log level: "trace", "debug", "info", "warn", "error"
+level = "info"
+
+# Log file path (optional)
+# Set to empty string or omit to disable file logging
+file = "~/.velo-hub/logs/app.log"
